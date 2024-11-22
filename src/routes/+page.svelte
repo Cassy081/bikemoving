@@ -14,8 +14,60 @@
     let arrivals = new Map();    // Holds arrival counts per station
     let map;                 // The map object
     let mapViewChanged = 0;  // Keeps track of map view changes
+    let timeFilter = -1;
 
-    // Step 1: Function to get SVG circle coordinates from station data
+    // Time filter label reactive statement
+    $: timeFilterLabel = new Date(0, 0, 0, 0, timeFilter).toLocaleString('en', {
+        timeStyle: 'short',
+    });
+
+    // Function to convert date to minutes since midnight
+    function minutesSinceMidnight(date) {
+        return date.getHours() * 60 + date.getMinutes();
+    }
+
+    // Filter trips based on selected time
+    $: filteredTrips =
+        timeFilter === -1
+            ? trips
+            : trips.filter((trip) => {
+                  let startedMinutes = minutesSinceMidnight(trip.started_at);
+                  let endedMinutes = minutesSinceMidnight(trip.ended_at);
+                  return (
+                      Math.abs(startedMinutes - timeFilter) <= 60 ||
+                      Math.abs(endedMinutes - timeFilter) <= 60
+                  );
+              });
+
+    // Filter arrivals based on filtered trips
+    $: filteredArrivals = d3.rollup(
+        filteredTrips,
+        (v) => v.length,  // Count the number of trips ending at a station
+        (d) => d.end_station_id
+    );
+
+    // Filter departures based on filtered trips
+    $: filteredDepartures = d3.rollup(
+        filteredTrips,
+        (v) => v.length,  // Count the number of trips starting at a station
+        (d) => d.start_station_id
+    );
+
+    // Filter stations based on filtered trips and clone station objects to avoid mutation
+    $: filteredStations = stations.map((station) => {
+        // Clone station to avoid modifying original station object
+        station = { ...station };
+
+        const arrivalsForStation = filteredArrivals.get(station.Number) ?? 0;
+        const departuresForStation = filteredDepartures.get(station.Number) ?? 0;
+        station.arrivals = arrivalsForStation;
+        station.departures = departuresForStation;
+        station.totalTraffic = station.arrivals + station.departures;
+
+        return station;
+    });
+
+    // Function to get SVG circle coordinates from station data
     function getCoords(station) {
         if (!map) return { cx: 0, cy: 0 };
         const point = new mapboxgl.LngLat(+station.Long, +station.Lat);
@@ -23,7 +75,7 @@
         return { cx: x, cy: y };
     }
 
-    // Step 2: Load Station and Traffic Data
+    // Load station and traffic data
     async function loadData() {
         // Fetching station data
         try {
@@ -35,35 +87,34 @@
 
         // Fetching traffic data (trips)
         try {
-            trips = await d3.csv('https://vis-society.github.io/labs/8/data/bluebikes-traffic-2024-03.csv');
-            
+            trips = await d3.csv('https://vis-society.github.io/labs/8/data/bluebikes-traffic-2024-03.csv').then((trips) =>{
+                for (let trip of trips) {
+                    trip.started_at = new Date(trip.started_at);
+                    trip.ended_at = new Date(trip.ended_at);
+                }
+                return trips;
+            });
+
             // Calculate departures (trips starting at a station)
             departures = d3.rollup(
                 trips,
                 (v) => v.length,  // Count the number of trips starting at a station
-                (d) => d.start_station_id  // Key by start_station_id
+                (d) => d.start_station_id
             );
 
             // Calculate arrivals (trips ending at a station)
             arrivals = d3.rollup(
                 trips,
                 (v) => v.length,  // Count the number of trips ending at a station
-                (d) => d.end_station_id  // Key by end_station_id
+                (d) => d.end_station_id
             );
 
             // Adding arrivals, departures, and total traffic to the stations
             stations = stations.map((station) => {
-                let id = station.Number; // Assuming station ID is stored in `Number`
-                
-                // Add the number of arrivals, if any, otherwise set to 0
+                const id = station.Number;
                 station.arrivals = arrivals.get(id) ?? 0;
-                
-                // Add the number of departures, if any, otherwise set to 0
                 station.departures = departures.get(id) ?? 0;
-                
-                // Total traffic is the sum of arrivals and departures
                 station.totalTraffic = station.arrivals + station.departures;
-                
                 return station;
             });
 
@@ -73,9 +124,8 @@
         }
     }
 
-    // Step 3: Initialize the Map and Add Bike Network Data
+    // Initialize the Map and Add Bike Network Data
     async function initMap() {
-        // Initialize the map
         map = new mapboxgl.Map({
             container: 'map',
             style: 'mapbox://styles/mapbox/streets-v12',
@@ -87,7 +137,6 @@
 
         await new Promise((resolve) => map.on('load', resolve));
 
-        // Adding bike network (Boston route)
         map.addSource('boston_route', {
             type: 'geojson',
             data: 'https://bostonopendata-boston.opendata.arcgis.com/datasets/boston::existing-bike-network-2022.geojson?outSR=%7B%22latestWkid%22%3A3857%2C%22wkid%22%3A102100%7D',
@@ -106,7 +155,6 @@
             }
         });
 
-        // Adding Cambridge bike network (Cambridge route)
         map.addSource('cambridge_route', {
             type: 'geojson',
             data: 'https://raw.githubusercontent.com/cambridgegis/cambridgegis_data/main/Recreation/Bike_Facilities/RECREATION_BikeFacilities.geojson'
@@ -126,7 +174,7 @@
         });
     }
 
-    // Step 4: Add SVG Overlay and Markers for Stations
+    // Add SVG Overlay and Markers for Stations
     function addSvgOverlay() {
         const svg = d3.select('#map').append('svg')
             .attr('id', 'svg-overlay')
@@ -136,12 +184,12 @@
             .style('height', '100%')
             .style('pointer-events', 'none');
 
-        // Step 5: Update Markers Dynamically
+        // Function to update markers
         const updateMarkers = () => {
             svg.selectAll('circle')
-                .data(stations)
+                .data(filteredStations)  // Use filtered stations here
                 .join('circle')
-                .attr('r', d => Math.min(10 + d.totalTraffic / 1000, 20))  // Map total traffic to circle size
+                .attr('r', d => Math.min(10 + d.totalTraffic / 1000, timeFilter === -1 ? 20 : 50))  // Adjust size based on filter
                 .attr('fill', 'steelblue')
                 .attr('fill-opacity', 0.6)
                 .attr('stroke', 'white')
@@ -150,26 +198,41 @@
                 .attr('cy', d => getCoords(d).cy);
         };
 
-        // Step 6: Listen for Map "Move" Event and Trigger Re-render of Markers
+        // Update markers when filteredStations changes
+        // svelte-ignore reactive_declaration_invalid_placement
+                $: filteredStations, updateMarkers();
+        
+        // Listen for Map "Move" Event and Trigger Re-render of Markers
         map.on('move', (evt) => {
-            mapViewChanged++; // Increment variable to trigger re-render
-            updateMarkers(); // Re-render markers
+            mapViewChanged++;  // Increment to trigger re-render
+            updateMarkers();
         });
-
+        
         // Initial call to update markers
         updateMarkers();
     }
 
     // onMount Lifecycle: Load Data and Initialize Map
     onMount(async () => {
-        await loadData();  // Load station and traffic data
-        await initMap();   // Initialize the map and add data sources
-        addSvgOverlay();   // Add SVG overlay and markers
+        await loadData();
+        initMap();
+        addSvgOverlay();
     });
 </script>
 
-<h1>Bike Moving</h1>
-<p>This project builds an immersive, interactive map visualization of bike traffic in the Boston area during different times of the day.</p>
+<header style="display:flex; gap:1em; align-items:baseline">
+    <h1>Bike Moving</h1>
+    <label style="margin-left: auto;">
+        Filter by time:
+        <input type="range" id="time-slider" bind:value={timeFilter} min="-1" max="1440" step="1">
+        {#if timeFilter === -1}
+        <em id="anyTime"  style="display:block; font-style:italic; color:grey">(any time)</em>
+        {:else}
+        <em id="timeLabel">{timeFilterLabel}</em>
+        {/if}
+    </label>
+</header>
+
 
 <div id="map">
     <svg></svg>
