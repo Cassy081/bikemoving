@@ -15,59 +15,13 @@
     let map;                 // The map object
     let mapViewChanged = 0;  // Keeps track of map view changes
     let timeFilter = -1;
+    let stationFlow = d3.scaleQuantize().domain([0, 1]).range([0, 0.5, 1]);
 
-    // Time filter label reactive statement
     $: timeFilterLabel = new Date(0, 0, 0, 0, timeFilter).toLocaleString('en', {
-        timeStyle: 'short',
-    });
+  timeStyle: 'short',
+});
 
-    // Function to convert date to minutes since midnight
-    function minutesSinceMidnight(date) {
-        return date.getHours() * 60 + date.getMinutes();
-    }
-
-    // Filter trips based on selected time
-    $: filteredTrips =
-        timeFilter === -1
-            ? trips
-            : trips.filter((trip) => {
-                  let startedMinutes = minutesSinceMidnight(trip.started_at);
-                  let endedMinutes = minutesSinceMidnight(trip.ended_at);
-                  return (
-                      Math.abs(startedMinutes - timeFilter) <= 60 ||
-                      Math.abs(endedMinutes - timeFilter) <= 60
-                  );
-              });
-
-    // Filter arrivals based on filtered trips
-    $: filteredArrivals = d3.rollup(
-        filteredTrips,
-        (v) => v.length,  // Count the number of trips ending at a station
-        (d) => d.end_station_id
-    );
-
-    // Filter departures based on filtered trips
-    $: filteredDepartures = d3.rollup(
-        filteredTrips,
-        (v) => v.length,  // Count the number of trips starting at a station
-        (d) => d.start_station_id
-    );
-
-    // Filter stations based on filtered trips and clone station objects to avoid mutation
-    $: filteredStations = stations.map((station) => {
-        // Clone station to avoid modifying original station object
-        station = { ...station };
-
-        const arrivalsForStation = filteredArrivals.get(station.Number) ?? 0;
-        const departuresForStation = filteredDepartures.get(station.Number) ?? 0;
-        station.arrivals = arrivalsForStation;
-        station.departures = departuresForStation;
-        station.totalTraffic = station.arrivals + station.departures;
-
-        return station;
-    });
-
-    // Function to get SVG circle coordinates from station data
+    // Step 1: Function to get SVG circle coordinates from station data
     function getCoords(station) {
         if (!map) return { cx: 0, cy: 0 };
         const point = new mapboxgl.LngLat(+station.Long, +station.Lat);
@@ -75,7 +29,7 @@
         return { cx: x, cy: y };
     }
 
-    // Load station and traffic data
+    // Step 2: Load Station and Traffic Data
     async function loadData() {
         // Fetching station data
         try {
@@ -87,34 +41,35 @@
 
         // Fetching traffic data (trips)
         try {
-            trips = await d3.csv('https://vis-society.github.io/labs/8/data/bluebikes-traffic-2024-03.csv').then((trips) =>{
-                for (let trip of trips) {
-                    trip.started_at = new Date(trip.started_at);
-                    trip.ended_at = new Date(trip.ended_at);
-                }
-                return trips;
-            });
-
+            trips = await d3.csv('https://vis-society.github.io/labs/8/data/bluebikes-traffic-2024-03.csv');
+            
             // Calculate departures (trips starting at a station)
             departures = d3.rollup(
                 trips,
                 (v) => v.length,  // Count the number of trips starting at a station
-                (d) => d.start_station_id
+                (d) => d.start_station_id  // Key by start_station_id
             );
 
             // Calculate arrivals (trips ending at a station)
             arrivals = d3.rollup(
                 trips,
                 (v) => v.length,  // Count the number of trips ending at a station
-                (d) => d.end_station_id
+                (d) => d.end_station_id  // Key by end_station_id
             );
 
             // Adding arrivals, departures, and total traffic to the stations
             stations = stations.map((station) => {
-                const id = station.Number;
+                let id = station.Number; // Assuming station ID is stored in `Number`
+                
+                // Add the number of arrivals, if any, otherwise set to 0
                 station.arrivals = arrivals.get(id) ?? 0;
+                
+                // Add the number of departures, if any, otherwise set to 0
                 station.departures = departures.get(id) ?? 0;
+                
+                // Total traffic is the sum of arrivals and departures
                 station.totalTraffic = station.arrivals + station.departures;
+                
                 return station;
             });
 
@@ -124,8 +79,9 @@
         }
     }
 
-    // Initialize the Map and Add Bike Network Data
+    // Step 3: Initialize the Map and Add Bike Network Data
     async function initMap() {
+        // Initialize the map
         map = new mapboxgl.Map({
             container: 'map',
             style: 'mapbox://styles/mapbox/streets-v12',
@@ -137,6 +93,7 @@
 
         await new Promise((resolve) => map.on('load', resolve));
 
+        // Adding bike network (Boston route)
         map.addSource('boston_route', {
             type: 'geojson',
             data: 'https://bostonopendata-boston.opendata.arcgis.com/datasets/boston::existing-bike-network-2022.geojson?outSR=%7B%22latestWkid%22%3A3857%2C%22wkid%22%3A102100%7D',
@@ -155,6 +112,7 @@
             }
         });
 
+        // Adding Cambridge bike network (Cambridge route)
         map.addSource('cambridge_route', {
             type: 'geojson',
             data: 'https://raw.githubusercontent.com/cambridgegis/cambridgegis_data/main/Recreation/Bike_Facilities/RECREATION_BikeFacilities.geojson'
@@ -174,7 +132,7 @@
         });
     }
 
-    // Add SVG Overlay and Markers for Stations
+    // Step 4: Add SVG Overlay and Markers for Stations
     function addSvgOverlay() {
         const svg = d3.select('#map').append('svg')
             .attr('id', 'svg-overlay')
@@ -184,39 +142,47 @@
             .style('height', '100%')
             .style('pointer-events', 'none');
 
-        // Function to update markers
+        // Step 5: Update Markers Dynamically
         const updateMarkers = () => {
             svg.selectAll('circle')
-                .data(filteredStations)  // Use filtered stations here
+                .data(stations)
                 .join('circle')
-                .attr('r', d => Math.min(10 + d.totalTraffic / 1000, timeFilter === -1 ? 20 : 50))  // Adjust size based on filter
+                .attr('r', d => Math.min(10 + d.totalTraffic / 1000, 20))  // Map total traffic to circle size
                 .attr('fill', 'steelblue')
                 .attr('fill-opacity', 0.6)
                 .attr('stroke', 'white')
                 .attr('stroke-width', 1)
                 .attr('cx', d => getCoords(d).cx)
-                .attr('cy', d => getCoords(d).cy);
+                .attr('cy', d => getCoords(d).cy)
+                .style('--departure-ratio', d => stationFlow(d.departures / d.totalTraffic || 0))
+                .style('--color-departures', 'steelblue')
+                .style('--color-arrivals', 'darkorange')
+                .style(
+                    '--color',
+                    d =>
+                        `color-mix(in oklch, var(--color-departures) calc(100% * var(--departure-ratio)), var(--color-arrivals))`
+                )
+                .style('fill', 'var(--color)')
+                .style('fill-opacity', 0.6)
+                .style('stroke', 'white')
+                .style('stroke-width', 1);
         };
 
-        // Update markers when filteredStations changes
-        // svelte-ignore reactive_declaration_invalid_placement
-                $: filteredStations, updateMarkers();
-        
-        // Listen for Map "Move" Event and Trigger Re-render of Markers
+        // Step 6: Listen for Map "Move" Event and Trigger Re-render of Markers
         map.on('move', (evt) => {
-            mapViewChanged++;  // Increment to trigger re-render
-            updateMarkers();
+            mapViewChanged++; // Increment variable to trigger re-render
+            updateMarkers(); // Re-render markers
         });
-        
+
         // Initial call to update markers
         updateMarkers();
     }
 
     // onMount Lifecycle: Load Data and Initialize Map
     onMount(async () => {
-        await loadData();
-        initMap();
-        addSvgOverlay();
+        await loadData();  // Load station and traffic data
+        await initMap();   // Initialize the map and add data sources
+        addSvgOverlay();   // Add SVG overlay and markers
     });
 </script>
 
@@ -224,11 +190,11 @@
     <h1>Bike Moving</h1>
     <label style="margin-left: auto;">
         Filter by time:
-        <input type="range" id="time-slider" bind:value={timeFilter} min="-1" max="1440" step="1">
+        <input type="range" bind:value={timeFilter} min="-1" max="1440" step="1">
         {#if timeFilter === -1}
         <em id="anyTime"  style="display:block; font-style:italic; color:grey">(any time)</em>
         {:else}
-        <em id="timeLabel">{timeFilterLabel}</em>
+        <time id="selectedTime" style="display: block;">{timeFilterLabel}</time>
         {/if}
     </label>
 </header>
@@ -238,8 +204,31 @@
     <svg></svg>
 </div>
 
+<div class="legend">
+    <div class="legend-label">Legend:</div>
+    <div class="legend-item" style="--departure-ratio: 1">
+      <div class="swatch"></div>
+      <span>More departures</span>
+    </div>
+    <div class="legend-item" style="--departure-ratio: 0.5">
+      <div class="swatch"></div>
+      <span>Balanced</span>
+    </div>
+    <div class="legend-item" style="--departure-ratio: 0">
+      <div class="swatch"></div>
+      <span>More arrivals</span>
+    </div>
+  </div>
+  
+
 <style>
     @import url('$lib/global.css');
+
+    :root {
+    --color-departures: steelblue;
+    --color-arrivals: darkorange;
+}
+
     
     #map {
         flex: 1;
@@ -254,4 +243,42 @@
         pointer-events: none;
     }
 
+    /* Legend container */
+    .legend {
+        display: flex;
+        align-items: center; /* Align items vertically */
+        gap: 1rem; /* Space between legend label and items */
+        margin-block: 1em; /* Space above and below the legend */
+        font-size: 0.9rem;
+    }
+
+    /* Legend label */
+    .legend-label {
+        font-weight: bold;
+    }
+
+    /* Legend items container */
+    .legend-item {
+        display: flex;
+        align-items: center; /* Align swatches and text vertically */
+        gap: 0.5rem; /* Small gap between swatch and text */
+    }
+
+    /* Swatches */
+    .legend-item .swatch {
+        width: 1.5rem;
+        height: 1rem;
+        border: 1px solid #ccc; /* Optional border for clarity */
+        background: color-mix(
+            in oklch,
+            var(--color-departures) calc(100% * var(--departure-ratio)),
+            var(--color-arrivals)
+        ); /* Dynamically set background color */
+}
+
+
+    /* Legend text */
+    .legend-item span {
+        line-height: 1.2;
+    }
 </style>
